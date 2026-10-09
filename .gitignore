@@ -1,5 +1,5 @@
-latest_frame.jpg
 asl_output.json
 .DS_Store
 __pycache__/
 env/
+hand_landmarker.task
