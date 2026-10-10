@@ -3,3 +3,5 @@ asl_output.json
 __pycache__/
 env/
 hand_landmarker.task
+asl_world.jsonl
+*.jsonl
