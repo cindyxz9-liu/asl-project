@@ -538,20 +538,8 @@ try:
             last_fps_time = now
             last_fps_frames = frames
 
-        cv2.putText(preview, f"{cam_name} -> Claude Code LIVE  {live_fps:4.1f} fps", (16, 32),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        cv2.putText(preview, f"mirror: {'on' if mirror_view else 'off'} ('m')   rotation: {rotation} ('r')",
-                    (16, 84), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        cv2.putText(preview, f"hands detected: {len(hands_seen)}"
-                             + (f"  ({', '.join(hands_seen)})" if hands_seen else ""),
-                    (16, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        yaw, pitch, roll = cam_pose["yaw_pitch_roll_deg"]
-        gx, gy, gz = cam_pose["gyro_rad_s"]
-        cv2.putText(preview, f"cam [{cam_pose['source']}] yaw {yaw:+.1f} pitch {pitch:+.1f} roll {roll:+.1f}"
-                             f"  gyro {gx:+.2f} {gy:+.2f} {gz:+.2f} rad/s"
-                             f"  {'MOVING' if cam_pose['moving'] else 'still'}",
-                    (16, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-
+        # No status text on the picture: the fps, mirror/rotation state and
+        # camera telemetry all live in asl_output.json instead.
         if now - last_status >= STATUS_INTERVAL:
             last_status = now
             with open("asl_output.json", "w") as f:
