@@ -89,7 +89,14 @@ class VisualOdometry:
     """
     source = "visual"
 
-    def __init__(self, K, work_width=480, min_matches=40, still_px=1.0, **_):
+    def __init__(self, K, work_width=480, min_matches=40, still_px=1.0, every=3, **_):
+        # ORB + matching costs ~15 ms on the main thread, which with the ~13 ms
+        # the preview's event pump takes pushes the loop past the camera's
+        # 33 ms (22 fps measured). Estimating on every Nth frame and holding
+        # the pose in between keeps the loop camera-bound.
+        self.every = max(1, every)
+        self.frame_no = 0
+        self.last_pose = None
         self.work_width = work_width
         self.set_intrinsics(K)
         self.orb = cv2.ORB_create(nfeatures=800, fastThreshold=12)
@@ -155,6 +162,16 @@ class VisualOdometry:
         return None
 
     def update(self, t, frame, exclude_boxes=()):
+        self.frame_no += 1
+        if self.last_pose is not None and (self.frame_no - 1) % self.every:
+            held = self.last_pose
+            return CameraPose(t, held.R_c2w, held.t_c2w, self.source, held.confidence,
+                              held.gyro, held.accel, False)
+        pose = self._update(t, frame, exclude_boxes)
+        self.last_pose = pose
+        return pose
+
+    def _update(self, t, frame, exclude_boxes=()):
         kp, des = self._features(frame, exclude_boxes)
         moving = False
         estimated = False
@@ -215,11 +232,13 @@ class InsvTelemetry:
     """
     source = "insv"
     G = 9.80665
-    # telemetry-parser normalises IMU axes to Gyroflow's camera convention. Whether
-    # that matches OpenCV's (x right, y down, z forward) has not been verified on
-    # an Ace Pro 2 clip. If a recorded pan comes out with the opposite yaw sign
-    # to `--telemetry visual` on the same clip, set this to np.diag([1, -1, -1]).
-    AXES = np.eye(3)
+    # telemetry-parser normalises IMU axes to Gyroflow's camera convention, which
+    # is not OpenCV's. Measured on an Ace Pro 2 clip (2026-10-10) by comparing the
+    # gyro's per-frame rotation with image-based visual odometry over 247 moving
+    # frames: the best-fitting axis map was x -> -x, y -> y, z -> -z, i.e. the IMU
+    # frame is turned 180 degrees about the vertical relative to the lens. With
+    # it, gyro and image rotations agree in sign on every axis.
+    AXES = np.diag([-1.0, 1.0, -1.0])
 
     def __init__(self, path, **_):
         try:
@@ -240,8 +259,11 @@ class InsvTelemetry:
             raise SystemExit(f"No IMU telemetry found in {path}. Webcam-mode captures have none; "
                              "record on the camera itself to get gyro data.")
         self.ts = np.array([s["timestamp_ms"] for s in samples]) / 1000.0
-        self.gyro = np.radians(np.array([s["gyro"] for s in samples], dtype=np.float64)) @ self.AXES.T
-        self.accl = (np.array([s["accl"] for s in samples], dtype=np.float64) * self.G) @ self.AXES.T
+        self.gyro = np.radians(np.array([s["gyro"] for s in samples], dtype=np.float64))
+        self.accl = np.array([s["accl"] for s in samples], dtype=np.float64) * self.G
+        if not np.array_equal(self.AXES, np.eye(3)):
+            self.gyro = self.gyro.dot(self.AXES.T)
+            self.accl = self.accl.dot(self.AXES.T)
         self._integrate()
 
     def _integrate(self):

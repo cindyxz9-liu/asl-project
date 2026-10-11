@@ -29,9 +29,11 @@ import numpy as np
 import cv2
 from collections import deque
 
-INFILL_MAX_GAP = 12        # frames; HaWoR's infiller handles much longer gaps, but it has a learned prior
+INFILL_MAX_GAP = 20        # frames; HaWoR's infiller handles much longer gaps, but it has a learned prior
 WRITE_LAG = INFILL_MAX_GAP # records are held this long so gaps can be back-filled before writing
-POSE_SMOOTHING = 0.6       # EMA on hand translation; 0 = none, 1 = frozen
+POSE_SMOOTHING = 0.0       # EMA on hand translation; 0 = none, 1 = frozen. Was 0.6: the recorded pose then
+                           # trailed a moving hand (median 14 px, 10% over 53 px on SD clip 014), which showed
+                           # as a ghost lag in the overlay. Training data should carry the raw per-frame pose.
 
 # Back-of-hand landmarks: wrist plus the four knuckles. Their centroid is the
 # hand's lock point -- it does not move when the fingers open or close, and it
@@ -82,6 +84,26 @@ class HandCamSolver:
         self.prev.pop(label, None)
 
 
+FINGER_TIPS, FINGER_MCPS = [8, 12, 16, 20], [5, 9, 13, 17]
+
+
+def hand_quality(points, world):
+    """How much of this hand the camera actually saw, for a downstream model to
+    weigh. landmarks_in_frame: of 21, how many are inside the picture.
+    finger_curl: 1.0 open, under 0.5 closed/fist -- when fingers are curled
+    or hidden, MediaPipe's finger joints are its guess, not an observation."""
+    pts = np.asarray(points)
+    inside = int((~((pts < 0.0) | (pts > 1.0)).any(axis=1)).sum())
+    curl = None
+    if len(world) == 21:
+        w = np.asarray(world)
+        palm = float(np.linalg.norm(w[9] - w[0]))
+        if palm > 1e-6:
+            curl = float(np.mean([np.linalg.norm(w[t] - w[m]) for t, m in zip(FINGER_TIPS, FINGER_MCPS)]) / palm)
+    return {"landmarks_in_frame": inside, "partial": inside < 15,
+            "finger_curl": None if curl is None else round(curl, 3), "fingers_hidden": curl is not None and curl < 0.5}
+
+
 def lift_to_world(joints_cam, pose):
     """Stage 4."""
     return (pose.R_c2w @ np.asarray(joints_cam).T).T + pose.t_c2w
@@ -101,7 +123,7 @@ class Infiller:
         self.last_seen = {}      # label -> (frame_index, joints_world)
 
     def push(self, record):
-        present = {h["label"]: h for h in record["hands"]}
+        present = {h["label"]: h for h in record["hands"] if "joints_world" in h}
         for label, hand in present.items():
             prior = self.last_seen.get(label)
             if prior is not None:
@@ -119,7 +141,7 @@ class Infiller:
         start_frame, start_joints = prior
         for rec in self.buffer:
             f = rec["frame"]
-            if start_frame < f < end_frame and not any(h["label"] == label for h in rec["hands"]):
+            if start_frame < f < end_frame and not any(h["label"] == label and "joints_world" in h for h in rec["hands"]):
                 a = (f - start_frame) / (end_frame - start_frame)
                 joints = (1 - a) * start_joints + a * end_joints
                 rec["hands"].append({
@@ -183,8 +205,19 @@ class WorldHandPipeline:
         out_hands = []
         for label, conf, pts, world in hands:
             seen.add(label)
+            quality = hand_quality(pts, world)
+            quality["image_points"] = [[round(float(x), 4), round(float(y), 4)] for x, y in pts]
+            px = np.asarray(pts) * [frame_w, frame_h]
+            quality["box_diag_f"] = round(float(np.hypot(*(px.max(axis=0) - px.min(axis=0)))) / float(self.solver.K[0, 0]), 3)
+            quality["small_hand"] = quality["box_diag_f"] < 0.22   # see SMALL_HAND_F in asl_stream.py
             cam = self.solver.solve(label, pts, world, frame_w, frame_h)
             if cam is None:
+                # No 3D placement (usually a partial hand at the frame edge):
+                # still record the hand so no movement is lost.
+                out_hands.append({"label": label, "confidence": round(float(conf), 3), "infilled": False,
+                                  "image_points": [[round(x, 4), round(y, 4)] for x, y in pts],
+                                  "world_landmarks": [[round(v, 4) for v in w] for w in world] if len(world) == 21 else None,
+                                  **quality})
                 continue
             jw = lift_to_world(cam["joints_cam"], self.pose)
             out_hands.append({
@@ -201,6 +234,7 @@ class WorldHandPipeline:
                 "center_cam": np.round(hand_center(cam["joints_cam"]), 4).tolist(),
                 "center_world": np.round(hand_center(jw), 4).tolist(),
                 "depth_m": round(float(cam["t"][2]), 3),
+                **quality,
             })
         for label in list(self.solver.prev):
             if label not in seen:

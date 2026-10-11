@@ -5,3 +5,15 @@ env/
 hand_landmarker.task
 asl_world.jsonl
 *.jsonl
+dataset/
+recordings/
+# Large or machine-specific: model weights, third-party clones, environments, media
+third_party/
+models/
+.venv/
+*.mp4
+*.mov
+*.task
+*.ckpt
+*.pkl
+*.pt
