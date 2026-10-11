@@ -29,7 +29,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("src"); ap.add_argument("dst")
     ap.add_argument("--max-gap", type=int, default=60, help="longest gap (frames) to interpolate across")
-    ap.add_argument("--hands", default="Left,Right")
+    ap.add_argument("--hands", default="Left,Right",
+                    help="hands to keep, e.g. --hands Right for a one-handed clip: records of the other label "
+                         "are dropped (on a chest camera they are usually the chin or a bystander)")
     ap.add_argument("--max-hold", type=int, default=15,
                     help="hold a hand's last observed pose for at most this many frames after it was seen "
                          "(never before its first sighting); beyond that the hand is recorded as "
@@ -44,18 +46,28 @@ def main():
     # Body anchors learned during the run (the signer's chin, read as a hand by
     # a chest-mounted camera) are applied in hindsight to the whole clip: the
     # tracker only learns them after the chin has shown up a few times.
+    for r in recs:
+        r["hands"] = [h for h in r["hands"] if h["label"] in labels]
     anchors = next((r["body_anchors"] for r in reversed(recs) if r.get("body_anchors")), [])
     removed = 0
     if anchors:
+        def is_near(c):
+            return c is not None and any(((c[0] - x) ** 2 + (c[1] - y) ** 2) ** 0.5 < 0.12 for x, y in anchors)   # ANCHOR_RADIUS
+        recent = {}                      # label -> [(frame, centre)] of its recent observed positions
         for r in recs:
             keep = []
             for h in r["hands"]:
                 c = h.get("center_image")
                 size = h.get("box_diag_f")
-                near = c is not None and any(((c[0] - x) ** 2 + (c[1] - y) ** 2) ** 0.5 < 0.12 for x, y in anchors)   # ANCHOR_RADIUS
-                if near and not h.get("infilled") and (size is None or size < 0.35):   # ANCHOR_KEEP_F
-                    removed += 1
-                    continue
+                if not h.get("infilled") and c is not None:
+                    # A hand that arrived at the anchor from elsewhere is the signer's hand
+                    # signing at the face, not the chin: keep it.
+                    hist = [p for fr, p in recent.get(h["label"], []) if r["frame"] - fr <= 30]
+                    came_from_elsewhere = any(not is_near(p) for p in hist)
+                    if is_near(c) and (size is None or size < 0.28) and not came_from_elsewhere:   # ANCHOR_KEEP_F
+                        removed += 1
+                        continue
+                    recent.setdefault(h["label"], []).append((r["frame"], c))
                 keep.append(h)
             r["hands"] = keep
     if anchors:

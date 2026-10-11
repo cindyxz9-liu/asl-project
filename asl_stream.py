@@ -181,8 +181,9 @@ ANCHOR_DETECTIONS = 30    # ...or this many small, steady detections at one spot
                           # clip 017 the chin was detected almost continuously, so it never had 3 episodes
 ANCHOR_GAP_FRAMES = 25    # frames without a small detection there that separate two episodes
 MAX_BODY_ANCHORS = 3      # the chin, plus static spots like bystanders' hands resting on a table
-ANCHOR_KEEP_F = 0.35      # near the anchor, only a hand at least this big (box diagonal / focal) is kept: a
-                          # real hand at the face is about 0.3 m from a chest camera and reads about 0.6
+ANCHOR_KEEP_F = 0.28      # near the anchor, a fit at least this big (box diagonal / focal) is a real hand and
+                          # kept. Measured: the chin reads 0.14-0.26; the signer's hand signing next to the
+                          # face 0.30-0.59 (SD clip 017). 0.35 deleted 43 real near-face hand frames there.
 ANCHOR_STEADY = 0.006     # median frame-to-frame movement of the small detections at a candidate spot must
                           # be under this (fraction of frame): the chin moves with the camera, a resting
                           # fist on an arm does not hold that still
@@ -894,11 +895,22 @@ def learn_body_anchor(found, index):
             _small_episodes.append([c[0], c[1], index, index, 1, [], c, 1])
 
 
-def on_body_anchor(points):
+def near_anchor(c):
+    return any(math.hypot(c[0] - a[0], c[1] - a[1]) < ANCHOR_RADIUS for a in body_anchors)
+
+
+def on_body_anchor(points, track=None):
+    """A small fit on a learned anchor (the chin) is not a hand -- unless it
+    continues a track that was recently somewhere else: the signer's hand
+    signing at the face is as small and as far as the chin, but it got there
+    by moving (SD clip 017, frames 88-120), while the chin is always there."""
     if not body_anchors or box_diag_f(points) >= ANCHOR_KEEP_F:
         return False
-    c = hand_center(points)
-    return any(math.hypot(c[0] - a[0], c[1] - a[1]) < ANCHOR_RADIUS for a in body_anchors)
+    if not near_anchor(hand_center(points)):
+        return False
+    if track is not None and any(not near_anchor(p) for p in track.get("hist", ())):
+        return False
+    return True
 
 
 def mostly_out_of_frame(points):
@@ -947,8 +959,9 @@ def signer_hands(found):
     unique = []
     min_side = MIN_HAND_SIDE_F * K[0, 0]
     learn_body_anchor(found, _frame_index[0])
-    for hand in found:
-        if on_body_anchor(hand[2]):
+    track_of = match_tracks([tuple(hand_center(h[2])) for h in found])
+    for k, hand in enumerate(found):
+        if on_body_anchor(hand[2], track_of.get(k)):
             continue
         p = np.asarray(hand[2]) * [width, height]
         if min(p[:, 0].max() - p[:, 0].min(), p[:, 1].max() - p[:, 1].min()) < min_side:
