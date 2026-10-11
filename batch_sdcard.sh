@@ -12,5 +12,9 @@ for stem in "$@"; do
       --out recordings/sdcard/${stem}_world.jsonl > recordings/sdcard/${stem}_log.txt 2>&1
   $PY fill_tracks.py recordings/sdcard/${stem}_world.jsonl recordings/sdcard/${stem}_world_filled.jsonl >> recordings/sdcard/${stem}_log.txt 2>&1
   $PY render_overlay.py "$dst" recordings/sdcard/${stem}_world_filled.jsonl recordings/sdcard/${stem}_overlay.mp4 --rotate $rot >> recordings/sdcard/${stem}_log.txt 2>&1
-  echo "DONE $stem rotate=$rot $(( $(date +%s) - t0 ))s $(grep -c Traceback recordings/sdcard/${stem}_log.txt) errors"
+  total=$($PY -c "import cv2;print(int(cv2.VideoCapture('$dst').get(7)))")
+  got=$(wc -l < recordings/sdcard/${stem}_world.jsonl | tr -d ' ')
+  crash=$(grep -cE "Traceback|Check failed|Killed|Abort|Segmentation" recordings/sdcard/${stem}_log.txt)
+  status=OK; [ "$crash" -gt 0 ] || [ "$got" -lt $(( total - 2 )) ] && status=INCOMPLETE
+  echo "$status $stem rotate=$rot $(( $(date +%s) - t0 ))s frames $got/$total crash-lines $crash"
 done

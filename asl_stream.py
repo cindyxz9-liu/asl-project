@@ -324,6 +324,9 @@ parser.add_argument("--fisheye-hfov", type=float, default=None, metavar="DEG",
                     help="the source is an undewarped fisheye with this horizontal field of view (Insta360 "
                          "video files; Webcam Mode output is already de-warped). Frames are undistorted to a "
                          "pinhole of --hfov before anything looks at them.")
+parser.add_argument("--gpu", action="store_true",
+                    help="keep MediaPipe on the GPU even with --thorough (faster, but long clips can run "
+                         "out of GPU buffers)")
 parser.add_argument("--thorough", action="store_true",
                     help="file processing: on every frame also run the full-frame detector and a high-"
                          "resolution search around each hand's last position, and merge the results. "
@@ -520,6 +523,14 @@ if telemetry is None:
     telemetry = make_telemetry(args.telemetry or "static", K)
 pipeline = WorldHandPipeline(K, telemetry, args.out)
 
+# The GPU delegate allocates a CoreVideo pixel buffer per distinct input size.
+# --thorough sends crops of many sizes every frame, and on long clips the GPU
+# ran out of buffers ("Error creating pixel buffer: -6662") after ~700 frames,
+# killing the run (SD clips 018/019 at 200 fps; 006 was killed for memory).
+# Offline thorough runs therefore use the CPU delegate; --gpu forces the GPU.
+use_cpu_delegate = bool(args.thorough) and not args.gpu
+
+
 def make_landmarker(mode, detect_confidence=DETECT_CONFIDENCE):
     return vision.HandLandmarker.create_from_options(
         vision.HandLandmarkerOptions(
@@ -527,7 +538,8 @@ def make_landmarker(mode, detect_confidence=DETECT_CONFIDENCE):
             # inference than the CPU path on this Mac (19 -> 11 ms tracker,
             # 18 -> 10 ms detector) with the same hands found. macOS GPU input
             # needs an alpha channel, see detect_in.
-            base_options=BaseOptions(model_asset_path=MODEL_PATH, delegate=BaseOptions.Delegate.GPU),
+            base_options=BaseOptions(model_asset_path=MODEL_PATH,
+                                     delegate=BaseOptions.Delegate.CPU if use_cpu_delegate else BaseOptions.Delegate.GPU),
             running_mode=mode,
             num_hands=MAX_HANDS_DETECTED,
             min_hand_detection_confidence=detect_confidence,
